@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>STEEL GUARDIAN - Tactical Cockpit Shooter</title>
+    <style>
+        :root {
+            --hud-color: #00ffcc;
+            --warning-color: #ff3300;
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Share Tech Mono', 'Courier New', monospace;
+            touch-action: none; /* スマホでのスクロールやズームを無効化 */
+        }
+        canvas {
+            display: block;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: var(--hud-color);
+        }
+        .start-screen {
+            background: rgba(0, 10, 5, 0.85);
+            padding: 40px;
+            border: 2px solid var(--hud-color);
+            box-shadow: 0 0 20px var(--hud-color);
+            text-align: center;
+            pointer-events: auto;
+            cursor: pointer;
+            transition: all 0.3s;
+            max-width: 80%;
+        }
+        .start-screen:hover {
+            background: rgba(0, 30, 20, 0.9);
+            box-shadow: 0 0 40px var(--hud-color);
+        }
+        h1 { font-size: clamp(1.5rem, 8vw, 3rem); margin-bottom: 0.5rem; letter-spacing: 5px; }
+        p { font-size: clamp(0.8rem, 4vw, 1.2rem); }
+        .controls { margin-top: 20px; font-size: 0.8rem; opacity: 0.8; line-height: 1.5; }
+        .scanline {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 4px, 3px 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="scanline"></div>
+    <div id="ui-overlay">
+        <div id="start-screen" class="start-screen">
+            <h1>STEEL GUARDIAN</h1>
+            <p>TACTICAL HUD INTERFACE v5.0</p>
+            <div class="controls">
+                [PC] WASD: MOVE | MOUSE: AIM & FIRE<br>
+                [MOBILE] LEFT: JOYSTICK | RIGHT: AIM & FIRE
+            </div>
+            <p style="margin-top: 30px; border: 1px solid; padding: 10px;">TAP TO INITIALIZE SYSTEM</p>
+        </div>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * STEEL GUARDIAN - Mobile Optimized Edition
+ * Author: 制作の導師 (The Buddy Director)
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const startScreen = document.getElementById('start-screen');
+
+let width, height;
+const keys = {};
+const mouse = { x: 0, y: 0 };
+
+// タッチ操作管理
+const touches = {
+    leftId: null,   // 移動用
+    rightId: null,  // 射撃用
+    joyStart: { x: 0, y: 0 },
+    joyCurrent: { x: 0, y: 0 },
+    isJoyActive: false
+};
+
+// Game Constants
+const HUD_COLOR = '#00ffcc';
+const WARN_COLOR = '#ff3300';
+const FOCAL_LENGTH = 500;
+
+// Game State
+let state = {
+    active: false,
+    score: 0,
+    health: 100,
+    energy: 100,
+    heat: 0,
+    shake: 0,
+    frame: 0
+};
+
+const player = {
+    x: 0, y: 0,
+    vx: 0, vy: 0,
+    friction: 0.92,
+    accel: 1.2
+};
+
+let stars = [];
+let enemies = [];
+let particles = [];
+let lasers = [];
+
+// Initialize
+function init() {
+    resize();
+    createStars();
+    loop();
+}
+
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    // リサイズ時に星を再配置
+    createStars();
+}
+
+function createStars() {
+    stars = [];
+    for (let i = 0; i < 200; i++) {
+        stars.push({
+            x: (Math.random() - 0.5) * 4000,
+            y: (Math.random() - 0.5) * 4000,
+            z: Math.random() * 4000
+        });
+    }
+}
+
+// Input Handlers (PC)
+window.addEventListener('resize', resize);
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+window.addEventListener('mousemove', e => {
+    if (!touches.isJoyActive) {
+        mouse.x = e.clientX;
+        mouse.y = e.clientY;
+    }
+});
+window.addEventListener('mousedown', (e) => {
+    if (state.active) shoot();
+});
+
+// Touch Handlers (Mobile)
+canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (!state.active) return;
+
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t.clientX < width / 2 && touches.leftId === null) {
+            // 左側：ジョイスティック開始
+            touches.leftId = t.identifier;
+            touches.joyStart = { x: t.clientX, y: t.clientY };
+            touches.joyCurrent = { x: t.clientX, y: t.clientY };
+            touches.isJoyActive = true;
+        } else if (t.clientX >= width / 2) {
+            // 右側：照準合わせ ＆ 即発射
+            touches.rightId = t.identifier;
+            mouse.x = t.clientX;
+            mouse.y = t.clientY;
+            shoot();
+        }
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t.identifier === touches.leftId) {
+            touches.joyCurrent = { x: t.clientX, y: t.clientY };
+        } else if (t.identifier === touches.rightId) {
+            mouse.x = t.clientX;
+            mouse.y = t.clientY;
+        }
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t.identifier === touches.leftId) {
+            touches.leftId = null;
+            touches.isJoyActive = false;
+        } else if (t.identifier === touches.rightId) {
+            touches.rightId = null;
+        }
+    }
+}, { passive: false });
+
+startScreen.addEventListener('click', () => {
+    state.active = true;
+    startScreen.style.display = 'none';
+    resetGame();
+});
+
+function resetGame() {
+    state.score = 0;
+    state.health = 100;
+    state.heat = 0;
+    player.x = player.y = player.vx = player.vy = 0;
+    enemies = [];
+    particles = [];
+}
+
+// Logic Classes
+class Enemy {
+    constructor() {
+        this.worldX = player.x + (Math.random() - 0.5) * 5000;
+        this.worldY = player.y + (Math.random() - 0.5) * 3000;
+        this.z = 5000;
+        this.size = 120;
+        this.hp = 2;
+        this.speed = 15 + Math.random() * 10;
+        this.type = Math.random() > 0.8 ? 'INTERCEPTOR' : 'DRONE';
+    }
+
+    update() {
+        this.z -= this.speed;
+        if (this.z < 0) {
+            const dx = Math.abs(this.worldX - player.x);
+            const dy = Math.abs(this.worldY - player.y);
+            if (dx < 250 && dy < 250) {
+                state.health -= 15;
+                state.shake = 30;
+                createExplosion(width / 2, height / 2, WARN_COLOR, 30);
+            }
+            return false;
+        }
+        return this.hp > 0;
+    }
+
+    draw() {
+        const scale = FOCAL_LENGTH / (FOCAL_LENGTH + this.z);
+        const sx = width / 2 + (this.worldX - player.x) * scale;
+        const sy = height / 2 + (this.worldY - player.y) * scale;
+        const sSize = this.size * scale;
+
+        if (sx < -sSize || sx > width + sSize) return;
+
+        ctx.save();
+        ctx.translate(sx, sy);
+        const distColor = this.z < 1500 ? WARN_COLOR : HUD_COLOR;
+        ctx.strokeStyle = distColor;
+        ctx.lineWidth = 2 * scale;
+        
+        const bSize = sSize * 0.8;
+        const anim = (Math.sin(state.frame * 0.2) * 5);
+        ctx.beginPath();
+        ctx.moveTo(-bSize - anim, -bSize / 2); ctx.lineTo(-bSize - anim, -bSize - anim); ctx.lineTo(-bSize / 2, -bSize - anim);
+        ctx.moveTo(bSize + anim, -bSize / 2); ctx.lineTo(bSize + anim, -bSize - anim); ctx.lineTo(bSize / 2, -bSize - anim);
+        ctx.moveTo(bSize + anim, bSize / 2); ctx.lineTo(bSize + anim, bSize + anim); ctx.lineTo(bSize / 2, bSize + anim);
+        ctx.moveTo(-bSize - anim, bSize / 2); ctx.lineTo(-bSize - anim, bSize + anim); ctx.lineTo(-bSize / 2, bSize + anim);
+        ctx.stroke();
+
+        ctx.fillStyle = this.hp < 2 ? '#fff' : distColor;
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(0, -sSize/2); ctx.lineTo(sSize/2, 0); ctx.lineTo(0, sSize/2); ctx.lineTo(-sSize/2, 0);
+        ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.restore();
+
+        this.sx = sx; this.sy = sy; this.sSize = sSize;
+    }
+}
+
+class Particle {
+    constructor(x, y, color, size = 4) {
+        this.x = x; this.y = y;
+        this.vx = (Math.random() - 0.5) * 20;
+        this.vy = (Math.random() - 0.5) * 20;
+        this.life = 1.0;
+        this.color = color;
+        this.size = size;
+    }
+    update() {
+        this.x += this.vx; this.y += this.vy;
+        this.life -= 0.02;
+        return this.life > 0;
+    }
+    draw() {
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = this.life;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+    }
+}
+
+function shoot() {
+    if (state.heat > 95) return;
+    state.heat += 4;
+    state.shake = 5;
+    lasers.push({ x: mouse.x, y: mouse.y, life: 8, color: '#fff' });
+
+    enemies.forEach(e => {
+        const dx = Math.abs(mouse.x - e.sx);
+        const dy = Math.abs(mouse.y - e.sy);
+        if (dx < e.sSize && dy < e.sSize) {
+            e.hp--;
+            if (e.hp <= 0) {
+                state.score += 100;
+                createExplosion(e.sx, e.sy, HUD_COLOR, 20);
+            } else {
+                createExplosion(e.sx, e.sy, '#fff', 5);
+            }
+        }
+    });
+}
+
+function createExplosion(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+        particles.push(new Particle(x, y, color, Math.random() * 6));
+    }
+}
+
+function update() {
+    if (!state.active) return;
+    state.frame++;
+    
+    // Player Movement (PC Keys)
+    if (keys['KeyA'] || keys['ArrowLeft']) player.vx -= player.accel;
+    if (keys['KeyD'] || keys['ArrowRight']) player.vx += player.accel;
+    if (keys['KeyW'] || keys['ArrowUp']) player.vy -= player.accel;
+    if (keys['KeyS'] || keys['ArrowDown']) player.vy += player.accel;
+
+    // Player Movement (Touch Joystick)
+    if (touches.isJoyActive) {
+        const dx = touches.joyCurrent.x - touches.joyStart.x;
+        const dy = touches.joyCurrent.y - touches.joyStart.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 5) {
+            const maxJoy = 50;
+            const ratio = Math.min(dist, maxJoy) / maxJoy;
+            player.vx += (dx / dist) * player.accel * ratio * 2;
+            player.vy += (dy / dist) * player.accel * ratio * 2;
+        }
+    }
+
+    player.vx *= player.friction;
+    player.vy *= player.friction;
+    player.x += player.vx;
+    player.y += player.vy;
+
+    if (state.heat > 0) state.heat -= 0.6;
+    if (state.frame % 40 === 0) enemies.push(new Enemy());
+
+    enemies = enemies.filter(e => e.update());
+    particles = particles.filter(p => p.update());
+    stars.forEach(s => {
+        s.z -= 20;
+        if (s.z <= 0) s.z = 4000;
+    });
+
+    if (state.health <= 0) {
+        state.active = false;
+        startScreen.style.display = 'block';
+        startScreen.innerHTML = `<h1>MISSION FAILED</h1><p>SCORE: ${state.score}</p><p style="margin-top:20px; border:1px solid; padding:10px;">TAP TO REBOOT</p>`;
+    }
+}
+
+function drawHUD() {
+    ctx.save();
+    const tilt = player.vx * 0.002;
+    const shakeX = (Math.random() - 0.5) * state.shake;
+    const shakeY = (Math.random() - 0.5) * state.shake;
+    if (state.shake > 0) state.shake *= 0.8;
+
+    ctx.translate(width/2 + shakeX, height/2 + shakeY);
+    ctx.rotate(tilt);
+    ctx.translate(-width/2, -height/2);
+
+    // Frame
+    const vGrad = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
+    vGrad.addColorStop(0, 'transparent');
+    vGrad.addColorStop(0.8, 'rgba(0, 20, 15, 0.3)');
+    vGrad.addColorStop(1, '#000');
+    ctx.fillStyle = vGrad;
+    ctx.fillRect(0, 0, width, height);
+
+    // Reticle
+    ctx.strokeStyle = state.heat > 85 ? WARN_COLOR : HUD_COLOR;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(mouse.x, mouse.y, 25, 0, Math.PI * 2);
+    ctx.moveTo(mouse.x - 35, mouse.y); ctx.lineTo(mouse.x + 35, mouse.y);
+    ctx.moveTo(mouse.x, mouse.y - 35); ctx.lineTo(mouse.x, mouse.y + 35);
+    ctx.stroke();
+
+    // Gauges
+    const drawGauge = (x, y, label, val, max, isRight = false) => {
+        const w = Math.min(150, width * 0.3), h = 12;
+        ctx.fillStyle = HUD_COLOR;
+        ctx.font = '10px "Share Tech Mono"';
+        ctx.textAlign = isRight ? 'right' : 'left';
+        ctx.fillText(label, x, y - 5);
+        ctx.strokeStyle = HUD_COLOR;
+        ctx.strokeRect(isRight ? x - w : x, y, w, h);
+        const fillW = Math.max(0, (val / max) * w);
+        ctx.fillStyle = val > (max * 0.8) && isRight ? WARN_COLOR : HUD_COLOR;
+        ctx.fillRect(isRight ? x - w : x, y, fillW, h);
+    };
+
+    drawGauge(30, height - 50, "ARMOR", state.health, 100);
+    drawGauge(width - 30, height - 50, "HEAT", state.heat, 100, true);
+
+    // Joystick UI (Only on Touch)
+    if (touches.isJoyActive) {
+        ctx.strokeStyle = 'rgba(0, 255, 204, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(touches.joyStart.x, touches.joyStart.y, 50, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(touches.joyCurrent.x, touches.joyCurrent.y, 25, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0, 255, 204, 0.2)';
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function loop() {
+    update();
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+
+    // Stars
+    ctx.fillStyle = '#fff';
+    stars.forEach(s => {
+        const scale = FOCAL_LENGTH / (FOCAL_LENGTH + s.z);
+        const px = width / 2 + (s.x - player.x * 0.5) * scale;
+        const py = height / 2 + (s.y - player.y * 0.5) * scale;
+        if (px > 0 && px < width && py > 0 && py < height) {
+            ctx.globalAlpha = scale;
+            ctx.fillRect(px, py, 2 * scale, 2 * scale);
+        }
+    });
+    ctx.globalAlpha = 1;
+
+    // Entities
+    enemies.sort((a, b) => b.z - a.z).forEach(e => e.draw());
+    particles.forEach(p => p.draw());
+
+    // Lasers
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = '#0ff';
+    lasers.forEach(l => {
+        ctx.strokeStyle = l.color;
+        ctx.lineWidth = l.life;
+        ctx.beginPath();
+        ctx.moveTo(width * 0.1, height); ctx.lineTo(l.x, l.y);
+        ctx.moveTo(width * 0.9, height); ctx.lineTo(l.x, l.y);
+        ctx.stroke();
+        l.life--;
+    });
+    lasers = lasers.filter(l => l.life > 0);
+    ctx.shadowBlur = 0;
+
+    if (state.active) drawHUD();
+    requestAnimationFrame(loop);
+}
+
+init();
+</script>
+</body>
+</html>
