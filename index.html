@@ -75,7 +75,7 @@
             <h1>STEEL GUARDIAN</h1>
             <p>TACTICAL HUD INTERFACE v6.0</p>
             <div class="controls">
-                [PC] WASD: MOVE | MOUSE: AIM & FIRE<br>
+                [PC] WASD: MOVE | MOUSE: AIM | CLICK/SPACE: FIRE<br>
                 [MOBILE] LEFT: JOYSTICK | RIGHT: AIM & FIRE<br>
                 ACQUIRE ENERGY CORES FOR SPECIAL ABILITIES
             </div>
@@ -122,8 +122,87 @@ let state = {
     msgTimer: 0,
     // Active Skills
     burstTimer: 0,
-    overdriveTimer: 0
+    overdriveTimer: 0,
+    roll: 0,
+    pitch: 0,
+    yaw: 0,
+    shakeX: 0,
+    shakeY: 0,
+    fireCooldown: 0,
+    bossActive: false,
+    nextBossScore: 5000,
+    bossBgmStep: 0,
+    bossLevel: 1,
+    boss: null
 };
+
+let audioCtx = null;
+let engineNoise, engineGain, engineFilter;
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        const bufferSize = audioCtx.sampleRate * 2;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        let lastOut = 0;
+        for (let i = 0; i < bufferSize; i++) {
+            const white = Math.random() * 2 - 1;
+            data[i] = (lastOut + (0.02 * white)) / 1.02; // Brown noise approximation
+            lastOut = data[i];
+            data[i] *= 3.5; // Compensate gain
+        }
+        
+        engineNoise = audioCtx.createBufferSource();
+        engineNoise.buffer = buffer;
+        engineNoise.loop = true;
+
+        engineFilter = audioCtx.createBiquadFilter();
+        engineFilter.type = 'lowpass';
+        engineFilter.frequency.value = 100;
+        
+        engineGain = audioCtx.createGain();
+        engineGain.gain.value = 0;
+
+        engineNoise.connect(engineFilter);
+        engineFilter.connect(engineGain);
+        engineGain.connect(audioCtx.destination);
+        engineNoise.start();
+    }
+}
+function playSound(type) {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    if (type === 'shoot') {
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(300, audioCtx.currentTime + 0.1);
+        gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.1);
+    } else if (type === 'explode') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.3);
+        gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.3);
+    } else if (type === 'hit') {
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.05);
+        gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.05);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.05);
+    }
+}
 
 const player = {
     x: 0, y: 0,
@@ -171,8 +250,14 @@ window.addEventListener('mousemove', e => {
         mouse.y = e.clientY;
     }
 });
+
+let mouseHeld = false;
 window.addEventListener('mousedown', (e) => {
+    mouseHeld = true;
     if (state.active) shoot();
+});
+window.addEventListener('mouseup', (e) => {
+    mouseHeld = false;
 });
 
 canvas.addEventListener('touchstart', e => {
@@ -221,6 +306,7 @@ canvas.addEventListener('touchend', e => {
 }, { passive: false });
 
 startScreen.addEventListener('click', () => {
+    initAudio();
     state.active = true;
     startScreen.style.display = 'none';
     resetGame();
@@ -236,6 +322,11 @@ function resetGame() {
     enemies = [];
     items = [];
     particles = [];
+    state.bossActive = false;
+    state.nextBossScore = 5000;
+    state.bossBgmStep = 0;
+    state.bossLevel = 1;
+    state.boss = null;
     showSystemMessage("SYSTEM INITIALIZED");
 }
 
@@ -245,23 +336,199 @@ function showSystemMessage(txt) {
 }
 
 // Classes
+class Boss {
+    constructor(level) {
+        this.worldX = player.x;
+        this.worldY = player.y - 500;
+        this.z = 8000;
+        this.type = Math.floor(Math.random() * 3); // 0: Carrier, 1: Dreadnought, 2: Core
+        this.level = level;
+        this.hp = 100 + level * 50;
+        this.maxHp = this.hp;
+
+        if (this.type === 0) {
+            this.size = 600;
+            this.color = '#ff0000';
+            this.speed = 10;
+        } else if (this.type === 1) {
+            this.size = 800; // Massive but narrower
+            this.color = '#00ff44';
+            this.speed = 8;
+        } else {
+            this.size = 400; // Smaller erratic core
+            this.color = '#0088ff';
+            this.speed = 12;
+        }
+    }
+    update() {
+        if (this.z > 2000) {
+            this.z -= this.speed;
+        } else {
+            if (this.type === 0) {
+                // Wide Strafe
+                this.worldX = player.x + Math.sin(state.frame * 0.02) * 1500;
+                this.worldY = player.y + Math.cos(state.frame * 0.015) * 800;
+            } else if (this.type === 1) {
+                // Slow imposing sweep
+                this.worldX = player.x + Math.sin(state.frame * 0.005) * 800;
+                this.worldY = player.y - 300 + Math.sin(state.frame * 0.01) * 200;
+            } else {
+                // Erratic jumps
+                this.worldX = player.x + Math.sin(state.frame * 0.05) * 600;
+                this.worldY = player.y + Math.cos(state.frame * 0.03) * 600;
+            }
+        }
+        
+        // Attack logic
+        if (this.type === 0) {
+            // Spawns fast scouts
+            if (state.frame % 60 === 0) {
+                const e = new Enemy();
+                e.type = 'SCOUT';
+                e.worldX = this.worldX; e.worldY = this.worldY; e.z = this.z;
+                e.hp = 1; e.size = 70; e.color = '#ff9900';
+                e.speed = 40;
+                enemies.push(e);
+            }
+        } else if (this.type === 1) {
+            // Fires fast missile-tanks
+            if (state.frame % 90 === 0) {
+                const e = new Enemy();
+                e.type = 'TANK';
+                e.worldX = this.worldX; e.worldY = this.worldY; e.z = this.z;
+                e.hp = 2; e.size = 120; e.color = '#00ff44';
+                e.speed = 25; 
+                enemies.push(e);
+            }
+        } else {
+            // Bullet hell / asteroid shower
+            if (state.frame % 30 === 0) {
+                const e = new Enemy();
+                e.type = 'ASTEROID';
+                e.worldX = this.worldX + (Math.random()-0.5)*1500; 
+                e.worldY = this.worldY + (Math.random()-0.5)*1500; 
+                e.z = this.z;
+                e.hp = 999; e.size = 80; e.color = '#0088ff';
+                e.speed = 30 + Math.random()*20;
+                enemies.push(e);
+            }
+        }
+        
+        const dx = Math.abs(this.worldX - player.x);
+        const dy = Math.abs(this.worldY - player.y);
+        if (this.z < 500 && dx < 800 && dy < 800) {
+            state.health -= 50;
+            state.shake = 50;
+            playSound('explode');
+        }
+        return this.hp > 0;
+    }
+    draw() {
+        const scale = FOCAL_LENGTH / (FOCAL_LENGTH + this.z);
+        const bx = width / 2 + (this.worldX - player.x) * scale;
+        const by = height / 2 + (this.worldY - player.y) * scale;
+        const pos = worldToScreen(bx, by);
+        const sSize = this.size * scale;
+        
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(state.roll + state.frame * 0.01);
+        
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = 4 * scale;
+        
+        ctx.beginPath();
+        if (this.type === 0) {
+            // Octagon
+            for(let i=0; i<8; i++){
+                const angle = i * Math.PI / 4;
+                const x = Math.cos(angle) * sSize;
+                const y = Math.sin(angle) * sSize;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+        } else if (this.type === 1) {
+            // Triangle / Dreadnought
+            ctx.moveTo(0, sSize); 
+            ctx.lineTo(-sSize, -sSize);
+            ctx.lineTo(0, -sSize*0.5);
+            ctx.lineTo(sSize, -sSize);
+        } else {
+            // Hexagon / Core ring
+            for(let i=0; i<6; i++){
+                const angle = i * Math.PI / 3;
+                const x = Math.cos(angle) * sSize;
+                const y = Math.sin(angle) * sSize;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.moveTo(sSize*0.5, 0);
+            ctx.arc(0, 0, sSize*0.5, 0, Math.PI*2);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        
+        ctx.fillStyle = this.hp < (this.maxHp * 0.2) ? '#fff' : this.color;
+        ctx.globalAlpha = 0.4 + Math.sin(state.frame*0.1)*0.2;
+        ctx.beginPath();
+        ctx.arc(0, 0, sSize * (this.type === 2 ? 0.3 : 0.4), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        this.sx = pos.x; this.sy = pos.y; this.sSize = sSize;
+    }
+}
+
 class Enemy {
     constructor() {
         this.worldX = player.x + (Math.random() - 0.5) * 5000;
         this.worldY = player.y + (Math.random() - 0.5) * 3000;
         this.z = 5000;
-        this.size = 120;
-        this.hp = 2;
-        this.speed = 18 + Math.random() * 12;
+        
+        const rand = Math.random();
+        if (rand < 0.2) {
+            // Fast Scout
+            this.type = 'SCOUT';
+            this.size = 70;
+            this.hp = 1;
+            this.speed = 35 + Math.random() * 15;
+            this.color = '#ff9900';
+            this.scoreVal = 150;
+        } else if (rand < 0.4) {
+            // Heavy Tank
+            this.type = 'TANK';
+            this.size = 200;
+            this.hp = 6;
+            this.speed = 10 + Math.random() * 5;
+            this.color = '#ff00ff';
+            this.scoreVal = 300;
+        } else if (rand < 0.6) {
+            // Obstacle (Asteroid)
+            this.type = 'ASTEROID';
+            this.size = 150 + Math.random() * 100;
+            this.hp = 999;
+            this.speed = 15 + Math.random() * 10;
+            this.color = '#888888';
+            this.scoreVal = 0;
+            this.worldX = player.x + (Math.random() - 0.5) * 2000; 
+        } else {
+            // Normal
+            this.type = 'NORMAL';
+            this.size = 120;
+            this.hp = 2;
+            this.speed = 18 + Math.random() * 12;
+            this.color = null; 
+            this.scoreVal = 100;
+        }
     }
     update() {
         this.z -= this.speed;
         if (this.z < 0) {
             const dx = Math.abs(this.worldX - player.x);
             const dy = Math.abs(this.worldY - player.y);
-            if (dx < 300 && dy < 300) {
-                state.health -= 15;
-                state.shake = 30;
+            const hitDist = this.type === 'ASTEROID' ? 400 : 300;
+            if (dx < hitDist && dy < hitDist) {
+                state.health -= (this.type === 'ASTEROID' ? 30 : 15);
+                state.shake = (this.type === 'ASTEROID' ? 50 : 30);
+                playSound('explode');
                 createExplosion(width / 2, height / 2, WARN_COLOR, 30);
             }
             return false;
@@ -270,27 +537,54 @@ class Enemy {
     }
     draw() {
         const scale = FOCAL_LENGTH / (FOCAL_LENGTH + this.z);
-        const sx = width / 2 + (this.worldX - player.x) * scale;
-        const sy = height / 2 + (this.worldY - player.y) * scale;
+        const bx = width / 2 + (this.worldX - player.x) * scale;
+        const by = height / 2 + (this.worldY - player.y) * scale;
+        const pos = worldToScreen(bx, by);
         const sSize = this.size * scale;
-        if (sx < -sSize || sx > width + sSize) return;
+        
+        if (pos.x < -sSize*2 || pos.x > width + sSize*2 || pos.y < -sSize*2 || pos.y > height + sSize*2) return;
 
         ctx.save();
-        ctx.translate(sx, sy);
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(state.roll + (this.type === 'ASTEROID' ? state.frame * 0.02 : 0));
+        
         const distColor = this.z < 1500 ? WARN_COLOR : HUD_COLOR;
-        ctx.strokeStyle = distColor;
+        ctx.strokeStyle = this.color || distColor;
         ctx.lineWidth = 2 * scale;
         
         const bSize = sSize * 0.8;
         ctx.beginPath();
-        ctx.strokeRect(-bSize, -bSize, bSize*2, bSize*2);
-        
-        ctx.fillStyle = this.hp < 2 ? '#fff' : distColor;
-        ctx.globalAlpha = 0.5;
-        ctx.fillRect(-sSize/4, -sSize/4, sSize/2, sSize/2);
+        if (this.type === 'ASTEROID') {
+            ctx.moveTo(0, -bSize);
+            ctx.lineTo(bSize, -bSize*0.5);
+            ctx.lineTo(bSize*0.8, bSize);
+            ctx.lineTo(-bSize*0.5, bSize*0.8);
+            ctx.lineTo(-bSize, 0);
+            ctx.closePath();
+            ctx.stroke();
+            ctx.fillStyle = distColor;
+            ctx.globalAlpha = 0.2;
+            ctx.fill();
+        } else {
+            ctx.strokeRect(-bSize, -bSize, bSize*2, bSize*2);
+            ctx.fillStyle = (this.hp < (this.type === 'TANK' ? 6 : 2)) && this.hp > 0 ? '#fff' : (this.color || distColor);
+            ctx.globalAlpha = 0.5;
+            if (this.type === 'SCOUT') {
+                ctx.beginPath();
+                ctx.moveTo(0, -sSize/2);
+                ctx.lineTo(sSize/2, sSize/2);
+                ctx.lineTo(-sSize/2, sSize/2);
+                ctx.closePath();
+                ctx.fill();
+            } else if (this.type === 'TANK') {
+                ctx.fillRect(-sSize/2, -sSize/4, sSize, sSize/2);
+            } else {
+                ctx.fillRect(-sSize/4, -sSize/4, sSize/2, sSize/2);
+            }
+        }
         ctx.restore();
 
-        this.sx = sx; this.sy = sy; this.sSize = sSize;
+        this.sx = pos.x; this.sy = pos.y; this.sSize = sSize;
     }
 }
 
@@ -325,13 +619,14 @@ class Item {
     }
     draw() {
         const scale = FOCAL_LENGTH / (FOCAL_LENGTH + this.z);
-        const sx = width / 2 + (this.worldX - player.x) * scale;
-        const sy = height / 2 + (this.worldY - player.y) * scale;
+        const bx = width / 2 + (this.worldX - player.x) * scale;
+        const by = height / 2 + (this.worldY - player.y) * scale;
+        const pos = worldToScreen(bx, by);
         const sSize = this.size * scale;
 
         ctx.save();
-        ctx.translate(sx, sy);
-        ctx.rotate(state.frame * 0.05);
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(state.roll + state.frame * 0.05);
         ctx.strokeStyle = this.color;
         ctx.lineWidth = 3;
         ctx.strokeRect(-sSize/2, -sSize/2, sSize, sSize);
@@ -365,9 +660,12 @@ class Particle {
 
 function shoot() {
     if (state.heat > 95 && state.overdriveTimer <= 0) return;
+    if (state.fireCooldown > 0) return;
     
+    state.fireCooldown = 6;
     if (state.overdriveTimer <= 0) state.heat += 4;
     state.shake = 5;
+    playSound('shoot');
 
     const fireLaser = (targetX, targetY, offset = 0) => {
         lasers.push({ x: targetX, y: targetY, life: 8, color: '#fff', offset: offset });
@@ -379,18 +677,42 @@ function shoot() {
         fireLaser(mouse.x + 40, mouse.y + 20, 50);
     }
 
+    if (state.bossActive && state.boss) {
+        let b = state.boss;
+        const dx = Math.abs(mouse.x - b.sx);
+        const dy = Math.abs(mouse.y - b.sy);
+        const hitRange = b.sSize * (state.burstTimer > 0 ? 1.5 : 1.0);
+        if (dx < hitRange && dy < hitRange) {
+             b.hp--;
+             playSound('hit');
+             createExplosion(b.sx + (Math.random()-0.5)*b.sSize, b.sy + (Math.random()-0.5)*b.sSize, '#fff', 5);
+             if (b.hp <= 0) {
+                 state.score += 500;
+                 playSound('explode');
+                 createExplosion(b.sx, b.sy, HUD_COLOR, 150);
+                 state.bossActive = false;
+                 state.nextBossScore += 5000;
+                 state.bossLevel++;
+                 showSystemMessage("COLOSSAL THREAT DEFEATED");
+                 for(let i=0;i<5;i++) items.push(new Item(b.worldX + (Math.random()-0.5)*1000, b.worldY + (Math.random()-0.5)*1000, b.z));
+             }
+        }
+    }
+
     enemies.forEach(e => {
         const dx = Math.abs(mouse.x - e.sx);
         const dy = Math.abs(mouse.y - e.sy);
         const hitRange = e.sSize * (state.burstTimer > 0 ? 1.5 : 1.0);
         if (dx < hitRange && dy < hitRange) {
             e.hp--;
-            if (e.hp <= 0) {
-                state.score += 100;
-                createExplosion(e.sx, e.sy, HUD_COLOR, 20);
+            if (e.hp <= 0 && e.type !== 'ASTEROID') {
+                state.score += e.scoreVal;
+                playSound('explode');
+                createExplosion(e.sx, e.sy, e.color || HUD_COLOR, e.size > 150 ? 40 : 20);
                 if (Math.random() > 0.85) items.push(new Item(e.worldX, e.worldY, e.z));
             } else {
-                createExplosion(e.sx, e.sy, '#fff', 5);
+                playSound('hit');
+                createExplosion(e.sx, e.sy, '#fff', e.type === 'ASTEROID' ? 2 : 5);
             }
         }
     });
@@ -428,7 +750,27 @@ function update() {
     player.x += player.vx;
     player.y += player.vy;
 
+    if (keys['Space'] || mouseHeld) {
+        shoot();
+    }
+
+    if (audioCtx && engineGain && engineFilter) {
+        if (!state.active) {
+            engineGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.3);
+        } else {
+            const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+            const intensity = Math.min(speed / 15, 1.0);
+            
+            // Gain ramps between 0.03 (idle hum) and 0.4 (max thrust)
+            engineGain.gain.setTargetAtTime(0.03 + intensity * 0.35, audioCtx.currentTime, 0.1);
+            
+            // Filter sweeps from 100Hz (deep rumble) to 1200Hz (woosh)
+            engineFilter.frequency.setTargetAtTime(100 + intensity * 1100, audioCtx.currentTime, 0.1);
+        }
+    }
+
     // Heat & Timers
+    if (state.fireCooldown > 0) state.fireCooldown--;
     if (state.heat > 0) state.heat -= 0.6;
     if (state.msgTimer > 0) state.msgTimer--;
     if (state.burstTimer > 0) state.burstTimer--;
@@ -437,7 +779,52 @@ function update() {
         state.heat = 0;
     }
 
+    state.roll = -player.vx * 0.008;
+    state.pitch = -player.vy * 3.5;
+    state.yaw = -player.vx * 3.5;
+    
+    state.shakeX = (Math.random() - 0.5) * state.shake;
+    state.shakeY = (Math.random() - 0.5) * state.shake;
+    if (state.shake > 0) state.shake *= 0.8;
+
     if (state.frame % 35 === 0) enemies.push(new Enemy());
+
+    if (state.score >= state.nextBossScore && !state.bossActive) {
+        state.bossActive = true;
+        state.boss = new Boss(state.bossLevel);
+        showSystemMessage("WARNING: COLOSSAL THREAT DETECTED");
+    }
+
+    if (state.bossActive && state.active && audioCtx) {
+        if (state.frame % 8 === 0) {
+            const notes = [110, 110, 220, 110, 146.83, 110, 220, 110];
+            const freq = notes[state.bossBgmStep % notes.length] * (1 + (state.bossLevel - 1) * 0.05);
+            
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.1);
+            
+            state.bossBgmStep++;
+        }
+    }
+
+    if (state.bossActive && state.boss) {
+        const alive = state.boss.update();
+        if (!alive) {
+            state.boss = null;
+            state.bossActive = false;
+        }
+    }
 
     enemies = enemies.filter(e => e.update());
     items = items.filter(i => i.update());
@@ -460,14 +847,7 @@ function update() {
 
 function drawHUD() {
     ctx.save();
-    const tilt = player.vx * 0.002;
-    const shakeX = (Math.random() - 0.5) * state.shake;
-    const shakeY = (Math.random() - 0.5) * state.shake;
-    if (state.shake > 0) state.shake *= 0.8;
-
-    ctx.translate(width/2 + shakeX, height/2 + shakeY);
-    ctx.rotate(tilt);
-    ctx.translate(-width/2, -height/2);
+    ctx.translate(state.shakeX * 0.5, state.shakeY * 0.5);
 
     // Vignette
     const vGrad = ctx.createRadialGradient(width/2, height/2, height/3, width/2, height/2, height);
@@ -491,6 +871,24 @@ function drawHUD() {
         ctx.textAlign = 'center';
         ctx.fillText(`> ${state.systemMsg}`, width/2, height * 0.3);
         ctx.globalAlpha = 1.0;
+    }
+
+    if (state.bossActive && state.boss) {
+        const bw = width * 0.6;
+        const bh = 15;
+        const bx = width / 2 - bw / 2;
+        const by = height * 0.12;
+        
+        ctx.fillStyle = WARN_COLOR;
+        ctx.font = '16px "Share Tech Mono"';
+        ctx.textAlign = 'center';
+        ctx.fillText("UNKNOWN COLOSSAL THREAT", width/2, by - 10);
+        
+        ctx.strokeStyle = WARN_COLOR;
+        ctx.strokeRect(bx, by, bw, bh);
+        
+        const hpRatio = Math.max(0, state.boss.hp / state.boss.maxHp);
+        ctx.fillRect(bx, by, bw * hpRatio, bh);
     }
 
     // Active Skills Display
@@ -533,20 +931,93 @@ function drawHUD() {
     ctx.restore();
 }
 
+function worldToScreen(x, y) {
+    const cx = width / 2;
+    const cy = height / 2;
+    const u = x - cx + state.yaw;
+    const v = y - cy + state.pitch;
+    const cosR = Math.cos(state.roll);
+    const sinR = Math.sin(state.roll);
+    
+    return {
+        x: cx + u * cosR - v * sinR + state.shakeX,
+        y: cy + u * sinR + v * cosR + state.shakeY
+    };
+}
+
+function drawSpatialGrid() {
+    ctx.save();
+    ctx.strokeStyle = `rgba(0, 255, 204, ${0.1 + Math.sin(state.frame*0.05)*0.03})`;
+    ctx.lineWidth = 1;
+
+    const cx = width / 2;
+    const cy = height / 2;
+    ctx.translate(cx + state.shakeX, cy + state.shakeY);
+    ctx.rotate(state.roll);
+    ctx.translate(-cx + state.yaw, -cy + state.pitch);
+
+    ctx.beginPath();
+    const horizonY = height / 2;
+    const gridCount = 20;
+    
+    const moveZ = (state.frame * 30) % 200;
+    const moveX = (player.x * 0.8) % 200;
+
+    for (let i = -gridCount; i <= gridCount; i++) {
+        const startX = width / 2 + (i * 100 - moveX) * 0.1;
+        const endX = width / 2 + (i * 100 - moveX) * 4;
+        
+        ctx.moveTo(startX, horizonY);
+        ctx.lineTo(endX, height + 800);
+        ctx.moveTo(startX, horizonY);
+        ctx.lineTo(endX, -800);
+    }
+    
+    for (let i = 1; i < 20; i++) {
+        const z = i * 150 - moveZ;
+        if (z < 10) continue;
+        const scale = FOCAL_LENGTH / z;
+        const yOffset = 400 * scale; 
+        
+        ctx.moveTo(-1000, horizonY + yOffset);
+        ctx.lineTo(width + 1000, horizonY + yOffset);
+        
+        ctx.moveTo(-1000, horizonY - yOffset);
+        ctx.lineTo(width + 1000, horizonY - yOffset);
+    }
+    ctx.stroke();
+    ctx.restore();
+}
+
 function loop() {
     update();
-    ctx.fillStyle = '#000';
+    
+    const r = Math.floor(10 + Math.sin(state.frame * 0.02) * 15);
+    const g = Math.floor(20 + Math.cos(state.frame * 0.015) * 15);
+    const b = Math.floor(30 + Math.sin(state.frame * 0.01) * 20);
+    
+    const bgX = width/2 - player.vx * 15;
+    const bgY = height/2 - player.vy * 15;
+    const grad = ctx.createRadialGradient(bgX, bgY, 0, width/2, height/2, width);
+    grad.addColorStop(0, `rgb(${r}, ${g}, ${b})`);
+    grad.addColorStop(1, '#000408');
+    
+    ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
+
+    drawSpatialGrid();
 
     // Starfield
     ctx.fillStyle = '#fff';
     stars.forEach(s => {
         const scale = FOCAL_LENGTH / (FOCAL_LENGTH + s.z);
-        const px = width / 2 + (s.x - player.x * 0.5) * scale;
-        const py = height / 2 + (s.y - player.y * 0.5) * scale;
-        if (px > 0 && px < width && py > 0 && py < height) {
+        const bx = width / 2 + (s.x - player.x * 0.5) * scale;
+        const by = height / 2 + (s.y - player.y * 0.5) * scale;
+        const pos = worldToScreen(bx, by);
+        
+        if (pos.x > -10 && pos.x < width + 10 && pos.y > -10 && pos.y < height + 10) {
             ctx.globalAlpha = scale;
-            ctx.fillRect(px, py, 2 * scale, 2 * scale);
+            ctx.fillRect(pos.x, pos.y, 2 * scale, 2 * scale);
         }
     });
     ctx.globalAlpha = 1;
@@ -555,6 +1026,7 @@ function loop() {
     enemies.sort((a, b) => b.z - a.z).forEach(e => e.draw());
     items.sort((a, b) => b.z - a.z).forEach(i => i.draw());
     particles.forEach(p => p.draw());
+    if (state.bossActive && state.boss) state.boss.draw();
 
     // Lasers
     ctx.shadowBlur = 10;
@@ -563,10 +1035,10 @@ function loop() {
         ctx.strokeStyle = l.color;
         ctx.lineWidth = l.life;
         ctx.beginPath();
-        ctx.moveTo(width * 0.1 + (l.offset || 0), height);
-        ctx.lineTo(l.x, l.y);
-        ctx.moveTo(width * 0.9 + (l.offset || 0), height);
-        ctx.lineTo(l.x, l.y);
+        ctx.moveTo(width * 0.1 + (l.offset || 0) + state.shakeX, height + state.shakeY);
+        ctx.lineTo(l.x + state.shakeX, l.y + state.shakeY);
+        ctx.moveTo(width * 0.9 + (l.offset || 0) + state.shakeX, height + state.shakeY);
+        ctx.lineTo(l.x + state.shakeX, l.y + state.shakeY);
         ctx.stroke();
         l.life--;
     });
