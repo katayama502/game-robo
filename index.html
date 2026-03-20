@@ -53,9 +53,50 @@
             background: rgba(0, 30, 20, 0.9);
             box-shadow: 0 0 40px var(--hud-color);
         }
-        h1 { font-size: clamp(1.5rem, 8vw, 3rem); margin-bottom: 0.5rem; letter-spacing: 5px; }
-        p { font-size: clamp(0.8rem, 4vw, 1.2rem); }
-        .controls { margin-top: 20px; font-size: 0.8rem; opacity: 0.8; line-height: 1.5; }
+        h1 { font-size: clamp(1.5rem, 8vw, 3rem); margin-bottom: 0.5rem; letter-spacing: 5px; text-shadow: 0 0 10px var(--hud-color); }
+        p { font-size: clamp(0.8rem, 4vw, 1.2rem); margin: 0.5rem 0; }
+        .controls { 
+            margin-top: 25px; 
+            font-size: 0.8rem; 
+            line-height: 1.6;
+            border-top: 1px solid rgba(0, 255, 204, 0.3);
+            padding-top: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .control-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(0, 255, 204, 0.05);
+            padding: 5px 15px;
+            border-radius: 4px;
+        }
+        .kbd {
+            background: rgba(0, 255, 204, 0.15);
+            padding: 2px 6px;
+            border-radius: 3px;
+            border: 1px solid rgba(0, 255, 204, 0.5);
+            color: #fff;
+            font-size: 0.75rem;
+            margin: 0 2px;
+        }
+        .start-btn {
+            margin-top: 30px;
+            border: 1px solid var(--hud-color);
+            padding: 12px 25px;
+            background: rgba(0, 255, 204, 0.1);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-weight: bold;
+            display: inline-block;
+            transition: all 0.2s;
+        }
+        .start-btn:hover {
+            background: var(--hud-color);
+            color: #000;
+        }
         .scanline {
             position: absolute;
             width: 100%;
@@ -72,14 +113,31 @@
     <div class="scanline"></div>
     <div id="ui-overlay">
         <div id="start-screen" class="start-screen">
-            <h1>STEEL GUARDIAN</h1>
-            <p>TACTICAL HUD INTERFACE v6.0</p>
-            <div class="controls">
-                [PC] WASD: MOVE | MOUSE: AIM | CLICK/SPACE: FIRE<br>
-                [MOBILE] LEFT: JOYSTICK | RIGHT: AIM & FIRE<br>
-                ACQUIRE ENERGY CORES FOR SPECIAL ABILITIES
+            <div id="screen-content">
+                <h1>STEEL GUARDIAN</h1>
+                <p>TACTICAL HUD INTERFACE v7.0</p>
+                
+                <div class="controls">
+                    <div class="control-row">
+                        <span>コックピット イドウ</span>
+                        <span><span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span> / ARROWS</span>
+                    </div>
+                    <div class="control-row">
+                        <span>エイム ・ ショウジュン</span>
+                        <span>MOUSE MOVE / TOUCH</span>
+                    </div>
+                    <div class="control-row">
+                        <span>レーザー ショット</span>
+                        <span><span class="kbd">SPACE</span> / CLICK</span>
+                    </div>
+                    <div class="control-row" style="color: var(--item-overdrive)">
+                        <span>コア カイシュウ</span>
+                        <span>パワーアップ システム</span>
+                    </div>
+                </div>
+                
+                <div class="start-btn">INITIALIZE SYSTEM</div>
             </div>
-            <p style="margin-top: 30px; border: 1px solid; padding: 10px;">TAP TO INITIALIZE SYSTEM</p>
         </div>
     </div>
     <canvas id="gameCanvas"></canvas>
@@ -841,7 +899,21 @@ function update() {
         }
         state.active = false;
         startScreen.style.display = 'block';
-        startScreen.innerHTML = `<h1>MISSION FAILED</h1><p>SCORE: ${state.score}</p><p>HIGH SCORE: ${state.highScore}</p><p style="margin-top:20px; border:1px solid; padding:10px;">TAP TO REBOOT</p>`;
+        
+        const content = document.getElementById('screen-content');
+        content.innerHTML = `
+            <h1 style="color:var(--warning-color)">MISSION FAILED</h1>
+            <p>SCORE: <span style="color:#fff">${state.score}</span></p>
+            <p>HIGH SCORE: <span style="color:#fff">${state.highScore}</span></p>
+            
+            <div class="controls">
+                <div class="control-row"><span>イドウ</span><span><span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span></span></div>
+                <div class="control-row"><span>エイム</span><span>MOUSE</span></div>
+                <div class="control-row"><span>ショット</span><span><span class="kbd">SPACE</span> / CLICK</span></div>
+            </div>
+            
+            <div class="start-btn">REBOOT SYSTEM</div>
+        `;
     }
 }
 
